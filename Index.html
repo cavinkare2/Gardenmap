@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Garden Outlet Verification Map</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 100%; height: 100%; font-family: Arial, sans-serif; }
+    body { background: #f3f4f6; overflow: hidden; }
+
+    #map { width: 100%; height: 100%; }
+
+    #statusBox {
+      position: fixed;
+      top: 12px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 1000;
+      background: rgba(255,255,255,0.96);
+      border: 1px solid #d1d5db;
+      border-radius: 12px;
+      padding: 10px 14px;
+      font-size: 14px;
+      font-weight: 700;
+      box-shadow: 0 3px 12px rgba(0,0,0,0.16);
+      max-width: calc(100% - 24px);
+      text-align: center;
+    }
+
+    #legend {
+      position: fixed;
+      right: 12px;
+      bottom: 18px;
+      z-index: 1000;
+      background: rgba(255,255,255,0.96);
+      border: 1px solid #d1d5db;
+      border-radius: 10px;
+      padding: 9px 11px;
+      box-shadow: 0 3px 10px rgba(0,0,0,0.15);
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1.7;
+    }
+
+    .dot {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      margin-right: 6px;
+      vertical-align: -1px;
+      border: 1px solid #fff;
+      box-shadow: 0 0 0 1px rgba(0,0,0,0.2);
+    }
+
+    .green { background: #16a34a; }
+    .red { background: #dc2626; }
+
+    .leaflet-popup-content {
+      font-size: 14px;
+      line-height: 1.45;
+      margin: 12px 14px;
+    }
+
+    @media (max-width: 600px) {
+      #statusBox { top: 8px; font-size: 13px; padding: 8px 10px; }
+      #legend { right: 8px; bottom: 12px; font-size: 12px; }
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="statusBox">Reading Google Sheet...</div>
+  <div id="legend">
+    <div><span class="dot green"></span>Verified</div>
+    <div><span class="dot red"></span>Not Verified</div>
+  </div>
+
+  <script>
+    // ==============================
+    // GOOGLE SHEET SETTINGS
+    // ==============================
+    const SHEET_ID = '1PbkO4SsoPespVhcTRW1YFYNkWzkYD_teFLqANNKFo_c';
+    const SHEET_NAME = 'Sheet1';
+
+    // The Google Sheet must be viewable by anyone with the link.
+    const CSV_URL =
+      'https://docs.google.com/spreadsheets/d/' +
+      SHEET_ID +
+      '/gviz/tq?tqx=out:csv&sheet=' +
+      encodeURIComponent(SHEET_NAME) +
+      '&t=' + Date.now();
+
+    const map = L.map('map', {
+      preferCanvas: true,
+      zoomControl: true
+    }).setView([20.5937, 78.9629], 5);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    const markerLayer = L.layerGroup().addTo(map);
+    const statusBox = document.getElementById('statusBox');
+
+    function setStatus(text, hideAfterMs) {
+      statusBox.textContent = text;
+      statusBox.style.display = 'block';
+      if (hideAfterMs) {
+        setTimeout(() => {
+          statusBox.style.display = 'none';
+        }, hideAfterMs);
+      }
+    }
+
+    function normalizeHeader(value) {
+      return String(value || '')
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, '_')
+        .replace(/[^a-z0-9_]/g, '');
+    }
+
+    function parseCSV(text) {
+      const rows = [];
+      let row = [];
+      let field = '';
+      let inQuotes = false;
+
+      for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+
+        if (inQuotes) {
+          if (ch === '"') {
+            if (text[i + 1] === '"') {
+              field += '"';
+              i++;
+            } else {
+              inQuotes = false;
+            }
+          } else {
+            field += ch;
+          }
+        } else {
+          if (ch === '"') {
+            inQuotes = true;
+          } else if (ch === ',') {
+            row.push(field);
+            field = '';
+          } else if (ch === '\n') {
+            row.push(field.replace(/\r$/, ''));
+            rows.push(row);
+            row = [];
+            field = '';
+          } else {
+            field += ch;
+          }
+        }
+      }
+
+      if (field.length || row.length) {
+        row.push(field.replace(/\r$/, ''));
+        rows.push(row);
+      }
+
+      return rows.filter(r => r.some(v => String(v).trim() !== ''));
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
+    function findHeaderRow(rows) {
+      for (let i = 0; i < Math.min(rows.length, 30); i++) {
+        const normalized = rows[i].map(normalizeHeader);
+        if (
+          normalized.includes('latitude') &&
+          normalized.includes('longitude') &&
+          normalized.includes('name_of_outlet')
+        ) {
+          return i;
+        }
+      }
+      return -1;
+    }
+
+    async function loadMap() {
+      try {
+        setStatus('Reading Google Sheet...');
+
+        const response = await fetch(CSV_URL, { cache: 'no-store' });
+        if (!response.ok) {
+          throw new Error('Google Sheet returned HTTP ' + response.status);
+        }
+
+        const text = await response.text();
+        const rows = parseCSV(text);
+
+        if (!rows.length) {
+          throw new Error('No data found in the Google Sheet.');
+        }
+
+        const headerRowIndex = findHeaderRow(rows);
+        if (headerRowIndex === -1) {
+          throw new Error('Could not find Latitude, Longitude and Name_of_Outlet columns.');
+        }
+
+        const headers = rows[headerRowIndex].map(normalizeHeader);
+        const idxLat = headers.indexOf('latitude');
+        const idxLng = headers.indexOf('longitude');
+        const idxName = headers.indexOf('name_of_outlet');
+        const idxVerified = headers.indexOf('verified');
+        const idxTown = headers.indexOf('town');
+
+        const dataRows = rows.slice(headerRowIndex + 1);
+        const points = [];
+
+        for (const row of dataRows) {
+          const lat = Number(String(row[idxLat] || '').trim());
+          const lng = Number(String(row[idxLng] || '').trim());
+
+          if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+          if (lat < -90 || lat > 90 || lng < -180 || lng > 180) continue;
+
+          points.push({
+            lat,
+            lng,
+            name: idxName >= 0 ? String(row[idxName] || '').trim() : '',
+            verified: idxVerified >= 0 ? String(row[idxVerified] || '').trim() : '',
+            town: idxTown >= 0 ? String(row[idxTown] || '').trim() : ''
+          });
+        }
+
+        if (!points.length) {
+          throw new Error('No valid outlet coordinates found.');
+        }
+
+        const bounds = [];
+        let verifiedCount = 0;
+        let pendingCount = 0;
+        const total = points.length;
+        const batchSize = 250;
+
+        markerLayer.clearLayers();
+
+        for (let start = 0; start < total; start += batchSize) {
+          const end = Math.min(start + batchSize, total);
+
+          for (let i = start; i < end; i++) {
+            const p = points[i];
+            const isVerified = p.verified.toLowerCase() === 'yes';
+            const color = isVerified ? '#16a34a' : '#dc2626';
+
+            if (isVerified) verifiedCount++;
+            else pendingCount++;
+
+            L.circleMarker([p.lat, p.lng], {
+              radius: 6,
+              color: '#ffffff',
+              weight: 2,
+              fillColor: color,
+              fillOpacity: 1
+            })
+              .addTo(markerLayer)
+              .bindPopup(
+                '<b>' + escapeHtml(p.name || 'Outlet') + '</b><br>' +
+                'Status: <b>' + (isVerified ? 'Verified' : 'Not Verified') + '</b>' +
+                (p.town ? '<br>Town: ' + escapeHtml(p.town) : '')
+              );
+
+            bounds.push([p.lat, p.lng]);
+          }
+
+          const pct = Math.round((end / total) * 100);
+          setStatus('Plotting outlets: ' + pct + '% (' + end.toLocaleString() + ' / ' + total.toLocaleString() + ')');
+
+          await new Promise(resolve => setTimeout(resolve, 0));
+        }
+
+        if (bounds.length === 1) {
+          map.setView(bounds[0], 15);
+        } else {
+          map.fitBounds(bounds, { padding: [25, 25], maxZoom: 16 });
+        }
+
+        setStatus(
+          total.toLocaleString() + ' outlets loaded | Verified: ' +
+          verifiedCount.toLocaleString() + ' | Not Verified: ' +
+          pendingCount.toLocaleString(),
+          3500
+        );
+
+      } catch (error) {
+        console.error(error);
+        setStatus(
+          'Unable to load Google Sheet. Make sure the sheet is shared as “Anyone with the link – Viewer”.'
+        );
+      }
+    }
+
+    loadMap();
+  </script>
+</body>
+</html>
